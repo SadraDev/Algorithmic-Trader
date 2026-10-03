@@ -1,34 +1,57 @@
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
+import 'api_endpoints.dart';
 
 class ApiService {
-  static final List<String> _candidateUrls = kIsWeb
-      ? ['http://localhost:8000/api/trading', 'http://127.0.0.1:8000/api/trading']
-      : (defaultTargetPlatform == TargetPlatform.android
-          ? ['http://10.0.2.2:8000/api/trading', 'http://localhost:8000/api/trading', 'http://127.0.0.1:8000/api/trading']
-          : ['http://localhost:8000/api/trading', 'http://127.0.0.1:8000/api/trading']);
+  static String baseUrl = ApiEndpoints.baseUrl;
+  static const String _prefKeyBaseUrl = 'saved_api_base_url';
 
-  static String baseUrl = _candidateUrls.first;
-
-  /// Fetches current MT5 connection state and account info with automatic host resolution.
-  static Future<Map<String, dynamic>> getAccountStatus() async {
-    for (final url in [baseUrl, ..._candidateUrls.where((u) => u != baseUrl)]) {
-      try {
-        final response = await http
-            .get(Uri.parse('$url/status/'))
-            .timeout(const Duration(seconds: 4));
-
-        if (response.statusCode == 200) {
-          baseUrl = url;
-          return json.decode(response.body) as Map<String, dynamic>;
-        }
-      } catch (e) {
-        debugPrint('Failed to connect to $url: $e');
+  /// Loads locally persisted API base URL from SharedPreferences.
+  static Future<void> loadSavedBaseUrl() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedUrl = prefs.getString(_prefKeyBaseUrl);
+      if (savedUrl != null && savedUrl.trim().isNotEmpty) {
+        baseUrl = savedUrl.trim();
       }
+    } catch (e) {
+      debugPrint('Error loading saved base URL: $e');
+    }
+  }
+
+  /// Persists custom API base URL locally on the phone.
+  static Future<bool> saveCustomBaseUrl(String newUrl) async {
+    try {
+      final trimmed = newUrl.trim();
+      if (trimmed.isEmpty) return false;
+      baseUrl = trimmed.endsWith('/') ? trimmed.substring(0, trimmed.length - 1) : trimmed;
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_prefKeyBaseUrl, baseUrl);
+      return true;
+    } catch (e) {
+      debugPrint('Error saving custom base URL: $e');
+      return false;
+    }
+  }
+
+  /// Fetches current MT5 connection state and account info using strictly configured baseUrl.
+  static Future<Map<String, dynamic>> getAccountStatus() async {
+    await loadSavedBaseUrl();
+    try {
+      final response = await http
+          .get(Uri.parse('$baseUrl/status/'))
+          .timeout(const Duration(seconds: 4));
+
+      if (response.statusCode == 200) {
+        return json.decode(response.body) as Map<String, dynamic>;
+      }
+    } catch (e) {
+      debugPrint('Failed to connect to $baseUrl: $e');
     }
 
-    return {'connected': false, 'account': null};
+    return {'status': 'offline', 'connected': false, 'account': null};
   }
 
   /// Triggers a trading execution cycle on demand.
@@ -99,28 +122,46 @@ class ApiService {
               if (indicators != null && indicators.isNotEmpty) 'indicators': indicators,
             }),
           )
-          .timeout(const Duration(seconds: 6));
+          .timeout(const Duration(seconds: 10));
 
       if (response.statusCode == 201 || response.statusCode == 200) {
         return json.decode(response.body) as Map<String, dynamic>;
       }
     } catch (e) {
       debugPrint('Error starting instance: $e');
+      return {'error': e.toString()};
     }
     return {'error': 'Failed to start instance'};
   }
 
-  /// Fetches all active running algorithm instances from backend.
+  /// Stops a running algorithm instance by ID.
+  static Future<bool> stopInstance(String instanceId) async {
+    try {
+      final response = await http
+          .post(
+            Uri.parse('$baseUrl/instances/$instanceId/stop/'),
+            headers: {'Content-Type': 'application/json'},
+          )
+          .timeout(const Duration(seconds: 8));
+
+      return response.statusCode == 200;
+    } catch (e) {
+      debugPrint('Error stopping instance: $e');
+      return false;
+    }
+  }
+
+  /// Lists active background worker instances.
   static Future<List<Map<String, dynamic>>> getActiveInstances() async {
     try {
       final response = await http
           .get(Uri.parse('$baseUrl/instances/'))
-          .timeout(const Duration(seconds: 4));
+          .timeout(const Duration(seconds: 5));
 
       if (response.statusCode == 200) {
-        final data = json.decode(response.body) as Map<String, dynamic>;
-        final List<dynamic> instances = data['instances'] ?? [];
-        return instances.cast<Map<String, dynamic>>();
+        final decoded = json.decode(response.body) as Map<String, dynamic>;
+        final List<dynamic> list = decoded['instances'] ?? [];
+        return list.cast<Map<String, dynamic>>();
       }
     } catch (e) {
       debugPrint('Error fetching active instances: $e');
@@ -128,60 +169,35 @@ class ApiService {
     return [];
   }
 
-  /// Pauses or resumes an active algorithm instance.
-  static Future<bool> pauseInstance(String instanceId) async {
+  /// Lists all strategy configurations saved in database.
+  static Future<List<Map<String, dynamic>>> getStrategyConfigs() async {
     try {
       final response = await http
-          .post(Uri.parse('$baseUrl/instances/$instanceId/pause/'))
-          .timeout(const Duration(seconds: 4));
-      return response.statusCode == 200;
-    } catch (e) {
-      debugPrint('Error pausing instance $instanceId: $e');
-      return false;
-    }
-  }
-
-  /// Stops and terminates an active algorithm instance.
-  static Future<bool> stopInstance(String instanceId) async {
-    try {
-      final response = await http
-          .post(Uri.parse('$baseUrl/instances/$instanceId/stop/'))
-          .timeout(const Duration(seconds: 4));
-      return response.statusCode == 200;
-    } catch (e) {
-      debugPrint('Error stopping instance $instanceId: $e');
-      return false;
-    }
-  }
-
-  /// Fetches real MT5 history deals directly from the connected terminal.
-  static Future<List<Map<String, dynamic>>> getMt5HistoryDeals() async {
-    try {
-      final response = await http
-          .get(Uri.parse('$baseUrl/history/'))
-          .timeout(const Duration(seconds: 6));
+          .get(Uri.parse('$baseUrl/configs/'))
+          .timeout(const Duration(seconds: 5));
 
       if (response.statusCode == 200) {
-        final data = json.decode(response.body) as Map<String, dynamic>;
-        final List<dynamic> deals = data['history_deals'] ?? [];
-        return deals.cast<Map<String, dynamic>>();
+        final decoded = json.decode(response.body) as Map<String, dynamic>;
+        final List<dynamic> list = decoded['configs'] ?? [];
+        return list.cast<Map<String, dynamic>>();
       }
     } catch (e) {
-      debugPrint('Error fetching MT5 history deals: $e');
+      debugPrint('Error fetching strategy configs: $e');
     }
     return [];
   }
 
-  /// Saves or updates a strategy configuration in Django database with JSON indicator pipeline.
+  /// Creates or updates a strategy config in database.
   static Future<bool> createStrategyConfig({
     required String name,
-    String symbol = 'EURUSD',
-    int timeframe = 5,
-    double riskPercentage = 1.0,
-    double slTpRatio = 2.0,
-    String operator = 'WEIGHTED',
-    double signalThreshold = 0.5,
-    Map<String, dynamic>? configJson,
+    required String symbol,
+    required int timeframe,
+    required double riskPercentage,
+    required double slTpRatio,
+    required String operator,
+    required double signalThreshold,
+    int maxActivePositions = 1,
+    required Map<String, dynamic> configJson,
   }) async {
     try {
       final response = await http
@@ -194,32 +210,29 @@ class ApiService {
               'timeframe': timeframe,
               'risk_percentage': riskPercentage,
               'sl_tp_ratio': slTpRatio,
+              'max_active_positions': maxActivePositions,
               'operator': operator,
               'signal_threshold': signalThreshold,
-              'config_json': configJson ?? {},
+              'config_json': configJson,
             }),
           )
-          .timeout(const Duration(seconds: 5));
+          .timeout(const Duration(seconds: 10));
 
-      return response.statusCode == 201 || response.statusCode == 200;
+      return response.statusCode == 200 || response.statusCode == 201;
     } catch (e) {
-      debugPrint('Error creating/updating strategy config: $e');
+      debugPrint('Error creating strategy config: $e');
       return false;
     }
   }
 
-  /// Deletes a strategy configuration from Django database by ID or Name.
+  /// Deletes a strategy config by ID or name.
   static Future<bool> deleteStrategyConfig({int? id, String? name}) async {
     try {
-      final payload = <String, dynamic>{};
-      if (id != null) payload['id'] = id;
-      if (name != null) payload['name'] = name;
-
       final response = await http
           .delete(
             Uri.parse('$baseUrl/configs/'),
             headers: {'Content-Type': 'application/json'},
-            body: json.encode(payload),
+            body: json.encode({'id': ?id, 'name': ?name}),
           )
           .timeout(const Duration(seconds: 5));
 
@@ -230,61 +243,25 @@ class ApiService {
     }
   }
 
-  /// Fetches strategy configurations from backend.
-  static Future<List<Map<String, dynamic>>> getStrategyConfigs() async {
+  /// Fetches historical trade deal logs.
+  static Future<List<Map<String, dynamic>>> getHistory() async {
     try {
       final response = await http
-          .get(Uri.parse('$baseUrl/configs/'))
-          .timeout(const Duration(seconds: 4));
+          .get(Uri.parse('$baseUrl/history/'))
+          .timeout(const Duration(seconds: 5));
 
       if (response.statusCode == 200) {
-        final data = json.decode(response.body) as Map<String, dynamic>;
-        final List<dynamic> configs = data['configs'] ?? [];
-        return configs.cast<Map<String, dynamic>>();
+        final decoded = json.decode(response.body) as Map<String, dynamic>;
+        final List<dynamic> list = decoded['history'] ?? [];
+        return list.cast<Map<String, dynamic>>();
       }
     } catch (e) {
-      debugPrint('Error fetching strategy configs: $e');
+      debugPrint('Error fetching history: $e');
     }
     return [];
   }
 
-  /// Fetches recent trade execution logs from backend.
-  static Future<List<Map<String, dynamic>>> getTradeLogs() async {
-    try {
-      final response = await http
-          .get(Uri.parse('$baseUrl/logs/'))
-          .timeout(const Duration(seconds: 4));
-
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body) as Map<String, dynamic>;
-        final List<dynamic> logs = data['logs'] ?? [];
-        return logs.cast<Map<String, dynamic>>();
-      }
-    } catch (e) {
-      debugPrint('Error fetching trade logs: $e');
-    }
-    return [];
-  }
-
-  /// Fetches list of available normalized indicators from backend.
-  static Future<List<Map<String, dynamic>>> getIndicators() async {
-    try {
-      final response = await http
-          .get(Uri.parse('$baseUrl/indicators/'))
-          .timeout(const Duration(seconds: 4));
-
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body) as Map<String, dynamic>;
-        final List<dynamic> indicators = data['indicators'] ?? [];
-        return indicators.cast<Map<String, dynamic>>();
-      }
-    } catch (e) {
-      debugPrint('Error fetching indicators: $e');
-    }
-    return [];
-  }
-
-  /// Evaluates a normalized indicator or dynamic WeightedCombiner over live MT5 rate data.
+  /// Evaluates an indicator or combiner on symbol rates.
   static Future<Map<String, dynamic>> evaluateIndicator({
     required String indicatorId,
     String symbol = 'EURUSD',
@@ -293,18 +270,17 @@ class ApiService {
     List<Map<String, dynamic>>? indicators,
   }) async {
     try {
-      final payload = {
-        'indicator_id': indicatorId,
-        'symbol': symbol,
-        'timeframe': timeframe,
-        if (indicators != null && indicators.isNotEmpty) 'indicators': indicators, ...?params,
-      };
-
       final response = await http
           .post(
-            Uri.parse('$baseUrl/indicators/evaluate/'),
+            Uri.parse('$baseUrl/indicator/evaluate/'),
             headers: {'Content-Type': 'application/json'},
-            body: json.encode(payload),
+            body: json.encode({
+              'indicator_id': indicatorId,
+              'symbol': symbol,
+              'timeframe': timeframe,
+              'params': ?params,
+              'indicators': ?indicators,
+            }),
           )
           .timeout(const Duration(seconds: 8));
 
@@ -312,8 +288,46 @@ class ApiService {
         return json.decode(response.body) as Map<String, dynamic>;
       }
     } catch (e) {
-      debugPrint('Error evaluating indicator $indicatorId: $e');
+      debugPrint('Error evaluating indicator: $e');
     }
-    return {'error': 'Evaluation failed', 'latest_value': 0.0, 'series': <double>[]};
+    return {'latest_value': 0.0, 'bias': 'ERROR', 'series': []};
+  }
+
+  /// Runs a modular historical backtest simulation.
+  static Future<Map<String, dynamic>> runBacktest({
+    required Map<String, dynamic> algorithmConfig,
+    required Map<String, dynamic> buyInConfig,
+    required String symbol,
+    required String dateFrom,
+    required String dateTo,
+    double initialBalance = 10000.0,
+    int timeframe = 5,
+  }) async {
+    try {
+      final response = await http
+          .post(
+            Uri.parse('$baseUrl/backtest/'),
+            headers: {'Content-Type': 'application/json'},
+            body: json.encode({
+              'algorithm_config': algorithmConfig,
+              'buy_in_config': buyInConfig,
+              'symbol': symbol,
+              'date_from': dateFrom,
+              'date_to': dateTo,
+              'initial_balance': initialBalance,
+              'timeframe': timeframe,
+            }),
+          )
+          .timeout(const Duration(seconds: 30));
+
+      if (response.statusCode == 200) {
+        return json.decode(response.body) as Map<String, dynamic>;
+      } else {
+        return {'error': 'Backtest HTTP error ${response.statusCode}'};
+      }
+    } catch (e) {
+      debugPrint('Error executing backtest: $e');
+      return {'error': e.toString()};
+    }
   }
 }

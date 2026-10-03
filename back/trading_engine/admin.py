@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import StrategyConfig, TradeLog
+from .models import StrategyConfig, StrategyInstance, TradeDeal
 
 
 @admin.register(StrategyConfig)
@@ -9,8 +9,15 @@ class StrategyConfigAdmin(admin.ModelAdmin):
     search_fields = ('name', 'symbol')
 
 
-@admin.register(TradeLog)
-class TradeLogAdmin(admin.ModelAdmin):
-    list_display = ('timestamp', 'symbol', 'action', 'signal', 'price', 'volume', 'sl_price', 'tp_price', 'ticket')
-    list_filter = ('action', 'symbol', 'signal')
+@admin.register(StrategyInstance)
+class StrategyInstanceAdmin(admin.ModelAdmin):
+    list_display = ('id', 'name', 'symbol', 'timeframe', 'is_running', 'latest_score', 'created_at')
+    list_filter = ('is_running', 'symbol')
+    search_fields = ('name', 'symbol')
+
+
+@admin.register(TradeDeal)
+class TradeDealAdmin(admin.ModelAdmin):
+    list_display = ('ticket', 'symbol', 'type', 'volume', 'price', 'profit', 'time')
+    list_filter = ('type', 'symbol')
     search_fields = ('symbol', 'ticket', 'comment')

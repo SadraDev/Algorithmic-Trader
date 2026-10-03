@@ -96,9 +96,19 @@ class AlgorithmsTestCase(TestCase):
         combiner_custom_thresh = AlgorithmCombiner(algorithms=[alg1, alg_low], operator='AND', signal_threshold=0.2)
         self.assertEqual(combiner_custom_thresh.evaluate(self.df), 1)
 
+    def test_combiner_xor_operator(self) -> None:
+        alg_pos = MockAlgorithm(0.8)
+        alg_neg = MockAlgorithm(-0.8)
+        combiner_xor = AlgorithmCombiner(algorithms=[alg_pos, alg_neg], operator='XOR', signal_threshold=0.5)
+        self.assertIn(combiner_xor.evaluate(self.df), [1, -1])
+
+        alg_pos2 = MockAlgorithm(0.7)
+        combiner_no_xor = AlgorithmCombiner(algorithms=[alg_pos, alg_pos2], operator='XOR', signal_threshold=0.5)
+        self.assertEqual(combiner_no_xor.evaluate(self.df), 0)
+
     def test_combiner_invalid_inputs(self) -> None:
         with self.assertRaises(ValueError):
             AlgorithmCombiner(algorithms=[])
 
         with self.assertRaises(ValueError):
-            AlgorithmCombiner(algorithms=[MockAlgorithm(1)], operator='XOR')  # type: ignore
+            AlgorithmCombiner(algorithms=[MockAlgorithm(1)], operator='INVALID')  # type: ignore
